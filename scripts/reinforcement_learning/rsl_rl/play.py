@@ -195,25 +195,101 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         # reset environment
         obs = env.get_observations()
         timestep = 0
+
+        # -- live distance + success tracking --
+        from isaaclab.utils.math import combine_frame_transforms as _cft
+
+        import warp as wp
+
+        base_env = env.unwrapped
+        num_envs = base_env.num_envs
+        device = base_env.device
+
+        # read threshold from the termination config if available, else default
+        success_threshold = 0.05
+        term_cfg = getattr(base_env.cfg, "terminations", None)
+        if term_cfg is not None:
+            success_term = getattr(term_cfg, "success", None)
+            if success_term is not None:
+                success_threshold = success_term.params.get("threshold", success_threshold)
+        print(f"[Eval] Using success threshold: {success_threshold} m")
+
+        total_episodes = 0
+        total_successes = 0
+        step_distances = []
+        log_interval_steps = 200
+
+        # per-env best distance tracker (updated every step, read on done, then reset)
+        best_dist = torch.full((num_envs,), float("inf"), device=device)
+
+        def _object_goal_distance():
+            """Compute per-env position distance (m) from object to commanded goal in world frame."""
+            robot = base_env.scene["robot"]
+            obj = base_env.scene["object"]
+            cmd = base_env.command_manager.get_command("object_pose")
+            des_pos_w, _ = _cft(
+                wp.to_torch(robot.data.root_pos_w),
+                wp.to_torch(robot.data.root_quat_w),
+                cmd[:, :3],
+            )
+            obj_pos_w = wp.to_torch(obj.data.root_pos_w)[:, :3]
+            return torch.linalg.norm(des_pos_w - obj_pos_w, dim=1)
+
+        def _print_stats(prefix=""):
+            if total_episodes == 0:
+                return
+            rate = total_successes / total_episodes
+            if step_distances:
+                dists = torch.stack(step_distances)
+                print(
+                    f"{prefix}[Eval] Episodes: {total_episodes:>5d} | "
+                    f"Success: {rate:.1%} ({total_successes}/{total_episodes}) | "
+                    f"Obj→Goal dist  mean={dists.mean():.4f} m  std={dists.std():.4f} m  "
+                    f"min={dists.min():.4f} m"
+                )
+            else:
+                print(
+                    f"{prefix}[Eval] Episodes: {total_episodes:>5d} | "
+                    f"Success: {rate:.1%} ({total_successes}/{total_episodes})"
+                )
+
         # simulate environment
         try:
             while True:
                 start_time = time.time()
                 # run everything in inference mode
                 with torch.inference_mode():
+                    # compute distance BEFORE stepping so we capture the pre-reset state
+                    dist = _object_goal_distance()
+                    best_dist = torch.minimum(best_dist, dist)
+                    step_distances.append(dist.mean().cpu())
+
                     # agent stepping
                     actions = policy(obs)
                     # env stepping
-                    obs, _, dones, _ = env.step(actions)
+                    obs, _, dones, extras = env.step(actions)
                     # reset recurrent states for episodes that have terminated
                     if version.parse(installed_version) >= version.parse("4.0.0"):
                         policy.reset(dones)
                     else:
                         policy_nn.reset(dones)
-                if args_cli.video:
-                    timestep += 1
-                    if timestep == args_cli.video_length:
-                        break
+
+                    # use the best distance each env achieved over the episode
+                    num_dones = int(dones.sum().item()) if dones.any() else 0
+                    if num_dones > 0:
+                        total_episodes += num_dones
+                        done_ids = dones.nonzero(as_tuple=False).squeeze(-1)
+                        total_successes += int((best_dist[done_ids] < success_threshold).sum().item())
+                        best_dist[done_ids] = float("inf")
+
+                timestep += 1
+
+                if timestep % log_interval_steps == 0:
+                    _print_stats()
+                    step_distances.clear()
+
+                if args_cli.video and timestep >= args_cli.video_length:
+                    break
 
                 sleep_time = dt - (time.time() - start_time)
                 if args_cli.real_time and sleep_time > 0:
@@ -222,7 +298,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             # close the simulator
             env.close()
         except KeyboardInterrupt:
-            pass
+            _print_stats(prefix="\n")
 
 
 if __name__ == "__main__":
