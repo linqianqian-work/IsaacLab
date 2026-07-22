@@ -494,6 +494,44 @@ def test_standardize_xform_ops_with_non_uniform_scale():
     assert_vec3_close(initial_scale, final_scale, eps=1e-5)
 
 
+def test_standardize_xform_ops_with_suffixed_scale_op():
+    """Test standardize_xform_ops preserves scale from suffixed ops such as xformOp:scale:_sz."""
+    stage = sim_utils.get_current_stage()
+
+    # Mimic Replicator kitchen meshes: Mesh prim with translate + suffixed scale, no orient.
+    prim_path = "/World/TestSuffixedScale"
+    prim = stage.DefinePrim(prim_path, "Mesh")
+    xformable = UsdGeom.Xformable(prim)
+
+    translate_op = xformable.AddTranslateOp(UsdGeom.XformOp.PrecisionDouble)
+    translate_op.Set(Gf.Vec3d(-0.9431401, 1.5563069, 0.87))
+
+    scale_attr = prim.CreateAttribute("xformOp:scale:_sz", Sdf.ValueTypeNames.Float3)
+    scale_attr.Set(Gf.Vec3f(0.4631401, 0.3, 0.02))
+    order_attr = prim.CreateAttribute("xformOpOrder", Sdf.ValueTypeNames.TokenArray)
+    order_attr.Set(["xformOp:translate", "xformOp:scale:_sz"])
+
+    assert "xformOp:scale" not in prim.GetPropertyNames()
+    assert "xformOp:scale:_sz" in prim.GetPropertyNames()
+
+    pos_before, quat_before = sim_utils.resolve_prim_pose(prim)
+    scale_before = Gf.Vec3d(Gf.Transform(xformable.GetLocalTransformation()).GetScale())
+
+    result = sim_utils.standardize_xform_ops(prim)
+    assert result is True
+
+    pos_after, quat_after = sim_utils.resolve_prim_pose(prim)
+    assert_vec3_close(Gf.Vec3d(*pos_before), pos_after, eps=1e-5)
+    assert_quat_close(quat_before, quat_after, eps=1e-5)
+
+    assert "xformOp:scale:_sz" not in prim.GetPropertyNames()
+    assert get_xform_ops(prim) == ["xformOp:translate", "xformOp:orient", "xformOp:scale"]
+
+    final_scale = prim.GetAttribute("xformOp:scale").Get()
+    assert_vec3_close(scale_before, final_scale, eps=1e-5)
+    assert_vec3_close(final_scale, (0.4631401, 0.3, 0.02), eps=1e-5)
+
+
 def test_standardize_xform_ops_identity_transform():
     """Test standardize_xform_ops with identity transform (no translation, rotation, or scale)."""
     # obtain stage handle

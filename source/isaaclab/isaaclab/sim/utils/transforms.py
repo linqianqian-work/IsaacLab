@@ -39,6 +39,11 @@ _INVALID_XFORM_OPS = [
 """List of invalid xform ops that should be removed."""
 
 
+def _prim_has_scale_xform_op(prop_names: list[str]) -> bool:
+    """Return True if the prim has any scale xform op (canonical or suffixed)."""
+    return any(name == "xformOp:scale" or name.startswith("xformOp:scale:") for name in prop_names)
+
+
 def standardize_xform_ops(
     prim: Usd.Prim,
     translation: tuple[float, ...] | None = None,
@@ -163,11 +168,13 @@ def standardize_xform_ops(
     if scale is not None:
         # User provided scale
         xform_scale = Gf.Vec3d(scale)
-    elif "xformOp:scale" in prop_names:
-        # Handle unit resolution for scale if present
-        # This occurs when assets are imported with different unit scales
-        # Reference: Omniverse Metrics Assembler
+    elif _prim_has_scale_xform_op(prop_names):
+        # Preserve composed local scale from GetLocalTransformation(). This covers canonical
+        # xformOp:scale as well as suffixed scale ops such as xformOp:scale:_sz.
         if "xformOp:scale:unitsResolve" in prop_names:
+            # Handle unit resolution for scale if present.
+            # This occurs when assets are imported with different unit scales.
+            # Reference: Omniverse Metrics Assembler
             units_resolve = prim.GetAttribute("xformOp:scale:unitsResolve").Get()
             for i in range(3):
                 xform_scale[i] = xform_scale[i] * units_resolve[i]
@@ -195,6 +202,9 @@ def standardize_xform_ops(
         # Clear the existing transform operation order
         for prop_name in prop_names:
             if prop_name in _INVALID_XFORM_OPS:
+                prim.RemoveProperty(prop_name)
+            elif prop_name.startswith("xformOp:scale:") and prop_name != "xformOp:scale:unitsResolve":
+                # Remove suffixed scale ops (e.g. xformOp:scale:_sz) after baking into canonical scale.
                 prim.RemoveProperty(prop_name)
 
         # Remove unitsResolve attribute if present (already handled in scale resolution above)
