@@ -211,6 +211,13 @@ def test_solver_kwargs_include_newton_deterministic_mode(monkeypatch: pytest.Mon
     assert kwargs["deterministic"] == wp.DeterministicMode.GPU_TO_GPU
 
 
+def test_mjwarp_solver_cfg_forwards_multiccd() -> None:
+    """MJWarp receives the configured multiple-contact collision option."""
+    kwargs = NewtonManager._filter_solver_kwargs(SolverMuJoCo, MJWarpSolverCfg(enable_multiccd=True))
+
+    assert kwargs["enable_multiccd"] is True
+
+
 @pytest.mark.parametrize(
     "solver_cfg",
     [
